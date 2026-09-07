@@ -45,4 +45,15 @@ go test ./...                                   # unit tests
 CONNECT_TEST_DSN='postgres:///vikn_connect_test?host=/tmp&sslmode=disable' go test ./...   # + Postgres-backed
 ```
 
-DB-backed tests drop and recreate only the module's own tables.
+DB-backed tests drop and recreate only the module's own tables. The consumer
+harness also has a real-broker test, opt-in the same way:
+
+```sh
+nats-server -js -p 42224 &
+CONNECT_TEST_NATS_URL=nats://127.0.0.1:42224 go test ./consumer/ -run Broker -v
+```
+
+It publishes three events into a throwaway stream and checks that a user
+event reaches the handler once, an integration-actor event is skipped without
+touching it, and a message that always fails is delivered `MaxDeliver` times,
+recorded as a rejection, then terminated with the consumer fully drained.
