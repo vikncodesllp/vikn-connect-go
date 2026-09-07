@@ -130,6 +130,23 @@ func Subscribe(js nats.JetStreamContext, opts Options) (*nats.Subscription, erro
 		nats.DeliverAll(), nats.MaxDeliver(opts.MaxDeliver))
 }
 
+// PermanentError marks a handler failure that no retry can fix: a
+// well-formed event this app cannot use, a payload that fails validation.
+// The harness records it and terminates the message on the first delivery
+// instead of burning through MaxDeliver.
+type PermanentError struct{ Err error }
+
+func (e *PermanentError) Error() string { return "permanent: " + e.Err.Error() }
+func (e *PermanentError) Unwrap() error { return e.Err }
+
+// Permanent wraps err so the harness does not retry it.
+func Permanent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &PermanentError{Err: err}
+}
+
 // acker is the slice of *nats.Msg the harness needs, so tests can drive it
 // with messages that are not bound to a live subscription.
 type acker interface {
@@ -146,7 +163,8 @@ type acker interface {
 //  2. Actor is an integration client and AllowIntegrationActor is false →
 //     ack without calling Handler. This is the loop breaker.
 //  3. Handler error before the last delivery → nak with backoff.
-//  4. Handler error on the last delivery → record a rejection, terminate.
+//  4. Handler error on the last delivery, or a PermanentError on any
+//     delivery → record a rejection, terminate.
 //  5. Handler nil → ack.
 func (o Options) Handle(ctx context.Context, msg *nats.Msg) error {
 	metadata, err := msg.Metadata()
@@ -180,6 +198,10 @@ func (o Options) handle(ctx context.Context, msg *nats.Msg, metadata *nats.MsgMe
 		return ack.Ack()
 	}
 	if handleErr := o.Handler(ctx, delivery); handleErr != nil {
+		var permanent *PermanentError
+		if errors.As(handleErr, &permanent) {
+			return o.reject(ctx, msg, metadata, receivedAt, ack, fmt.Errorf("handler refused event: %w", permanent.Err))
+		}
 		if int(metadata.NumDelivered) >= o.MaxDeliver {
 			return o.reject(ctx, msg, metadata, receivedAt, ack,
 				fmt.Errorf("handler failed on delivery %d of %d: %w", metadata.NumDelivered, o.MaxDeliver, handleErr))

@@ -3,6 +3,7 @@ package consumer
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,6 +107,21 @@ func TestHandleRecordsPoisonOnLastDelivery(t *testing.T) {
 	}
 	if len(store.rejections) != 1 || store.rejections[0].EventID != "evt-1" || store.rejections[0].DeliveryCount != 5 {
 		t.Fatalf("rejections = %+v", store.rejections)
+	}
+}
+
+func TestHandleRecordsPermanentErrorAtOnce(t *testing.T) {
+	ack := &fakeAck{}
+	store := &memStore{}
+	opts := Options{Store: store, Handler: func(context.Context, Delivery) error { return Permanent(errors.New("not my event")) }}
+	if err := opts.handle(context.Background(), message(connect.Actor{}), meta(1), ack); err == nil {
+		t.Fatal("expected an error")
+	}
+	if ack.calls[0] != "term" || len(store.rejections) != 1 || !strings.Contains(store.rejections[0].Reason, "not my event") {
+		t.Fatalf("calls = %v, rejections = %+v", ack.calls, store.rejections)
+	}
+	if Permanent(nil) != nil {
+		t.Fatal("Permanent(nil) must be nil")
 	}
 }
 
