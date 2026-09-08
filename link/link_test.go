@@ -57,9 +57,16 @@ func TestUpsertKeepsTheIdAndRefreshesTheRemoteSide(t *testing.T) {
 	if err := db.Create(&Link{OrganizationID: org, LocalType: "issue", LocalID: issue, RemoteApp: "vikn-desk", RemoteType: "ticket", Direction: DirectionInbound}).Error; err == nil {
 		t.Fatal("duplicate active link should violate the unique index")
 	}
-	// Soft-deleting frees the key.
+	// Soft-deleting frees the key, and a replayed announcement under the
+	// deleted id does not bring the link back.
 	db.Model(&Link{}).Where("id = ?", first.ID).Update("entry_status", 2)
 	if _, err := Find(db, Key{org, "issue", issue, "vikn-desk", "ticket"}); !errors.Is(err, gorm.ErrRecordNotFound) {
 		t.Fatalf("deleted link should not be found: %v", err)
+	}
+	if _, err := Upsert(db, Link{ID: first.ID, OrganizationID: org, LocalType: "issue", LocalID: issue, RemoteApp: "vikn-desk", RemoteType: "ticket", Direction: DirectionInbound}); !errors.Is(err, ErrDeleted) {
+		t.Fatalf("replay under a deleted id should be refused with ErrDeleted, got %v", err)
+	}
+	if _, err := Find(db, Key{org, "issue", issue, "vikn-desk", "ticket"}); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatal("the deleted link must stay deleted")
 	}
 }

@@ -109,15 +109,31 @@ func ForLocal(db *gorm.DB, organizationID uuid.UUID, localType string, localID u
 	return links, err
 }
 
+// ErrDeleted is returned by Upsert when the link id named by the caller
+// was deliberately deleted here: a replayed announcement of it from the far
+// side does not bring it back.
+var ErrDeleted = errors.New("link was deleted")
+
 // Upsert creates the link, or refreshes the remote side of the active row
 // that already exists for its key. The id of an existing row wins, so the
-// far side's mirror keeps pointing at the same link.
+// far side's mirror keeps pointing at the same link. A row that exists
+// under the given id but was deleted is left alone and reported as
+// ErrDeleted, so a consumer replaying history skips it.
 func Upsert(db *gorm.DB, l Link) (Link, error) {
 	if err := l.Validate(); err != nil {
 		return Link{}, err
 	}
 	existing, err := Find(db, Key{l.OrganizationID, l.LocalType, l.LocalID, l.RemoteApp, l.RemoteType})
 	if errors.Is(err, gorm.ErrRecordNotFound) {
+		if l.ID != uuid.Nil {
+			var count int64
+			if err := db.Model(&Link{}).Where("id = ?", l.ID).Count(&count).Error; err != nil {
+				return Link{}, err
+			}
+			if count > 0 {
+				return Link{}, ErrDeleted
+			}
+		}
 		if err := db.Create(&l).Error; err != nil {
 			return Link{}, err
 		}
