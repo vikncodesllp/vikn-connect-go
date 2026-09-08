@@ -82,6 +82,15 @@ type Options struct {
 	Handler Handler
 	Store   Store
 
+	// ReplayHistory makes a durable that does not exist yet start at the
+	// beginning of the stream instead of at new events. Leave it false for
+	// anything that fires tenant rules: a rule saved today must not run over
+	// last month's events the moment a new consumer is created. Set it for
+	// pure observers and cache maintainers (audit, link mirroring), which
+	// want the whole history. An existing durable keeps the position it
+	// has; this only decides where a brand-new one begins.
+	ReplayHistory bool
+
 	// AllowIntegrationActor lets events caused by another app through.
 	// Leave it false for anything that fires tenant rules; set it for pure
 	// observers such as the audit consumer.
@@ -122,12 +131,39 @@ func Subscribe(js nats.JetStreamContext, opts Options) (*nats.Subscription, erro
 		return nil, errors.New("consumer handler is required")
 	}
 	ctx := context.Background()
-	return js.QueueSubscribe(opts.Subject, opts.Durable, func(msg *nats.Msg) {
+	handler := func(msg *nats.Msg) {
 		if err := opts.Handle(ctx, msg); err != nil {
 			opts.Log("connect consumer %s: %v", opts.Durable, err)
 		}
-	}, nats.Durable(opts.Durable), nats.BindStream(opts.Stream), nats.ManualAck(), nats.AckExplicit(),
-		nats.DeliverAll(), nats.MaxDeliver(opts.MaxDeliver))
+	}
+	// The durable is created here, explicitly, and then bound to. Letting
+	// QueueSubscribe create it would make the client delete it again on
+	// Unsubscribe/Drain — every clean shutdown would forget the position,
+	// and the next start would either replay the whole stream or skip
+	// everything published while the process was down. A consumer this
+	// code created is never deleted by it.
+	if _, err := js.ConsumerInfo(opts.Stream, opts.Durable); err != nil {
+		if !errors.Is(err, nats.ErrConsumerNotFound) {
+			return nil, fmt.Errorf("inspect consumer %s: %w", opts.Durable, err)
+		}
+		cfg := &nats.ConsumerConfig{
+			Durable:        opts.Durable,
+			DeliverSubject: nats.NewInbox(),
+			DeliverGroup:   opts.Durable,
+			FilterSubject:  opts.Subject,
+			AckPolicy:      nats.AckExplicitPolicy,
+			MaxDeliver:     opts.MaxDeliver,
+			ReplayPolicy:   nats.ReplayInstantPolicy,
+			DeliverPolicy:  nats.DeliverNewPolicy,
+		}
+		if opts.ReplayHistory {
+			cfg.DeliverPolicy = nats.DeliverAllPolicy
+		}
+		if _, err := js.AddConsumer(opts.Stream, cfg); err != nil {
+			return nil, fmt.Errorf("create consumer %s: %w", opts.Durable, err)
+		}
+	}
+	return js.QueueSubscribe(opts.Subject, opts.Durable, handler, nats.Bind(opts.Stream, opts.Durable), nats.ManualAck())
 }
 
 // PermanentError marks a handler failure that no retry can fix: a

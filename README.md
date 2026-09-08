@@ -26,6 +26,11 @@ check identical across repos.
   pure observers (the audit consumer) turn it on.
 - **Nothing is enqueued without a broker.** `outbox.Enqueue` is a no-op when
   `NATS_URL` is unset, so a table cannot grow with rows nothing drains.
+- **A new durable starts at new events.** `consumer.Subscribe` creates the
+  durable itself and binds to it, so a clean shutdown never deletes it and a
+  restart continues where it left off. Only a consumer that sets
+  `ReplayHistory` (the audit, link mirroring) reads the stream from the start;
+  a rules consumer never runs today's rules over last month's events.
 - **A message that fails `MaxDeliver` times is recorded, then terminated.**
   It lands in the app's own `integration_event_rejections` table with headers,
   payload and reason, instead of vanishing.

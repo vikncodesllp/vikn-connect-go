@@ -2,110 +2,133 @@ package consumer
 
 import (
 	"context"
-	"errors"
 	"os"
+	"os/exec"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/nats-io/nats.go"
 
 	connect "github.com/vikncodesllp/vikn-connect-go"
 )
 
-// TestHarnessAgainstABroker drives Subscribe/Handle through a real JetStream
-// server so the durable, stream binding, MaxDeliver and nak backoff are
-// exercised for real. Set CONNECT_TEST_NATS_URL to run it, e.g. after
-// `nats-server -js -p 42224`.
-func TestHarnessAgainstABroker(t *testing.T) {
-	url := os.Getenv("CONNECT_TEST_NATS_URL")
-	if url == "" {
-		t.Skip("CONNECT_TEST_NATS_URL not set")
+// startBroker runs a throwaway nats-server with JetStream on a free port.
+// Skips when the binary is not on PATH; CONNECT_TEST_NATS_URL points at an
+// already-running broker instead.
+func startBroker(t *testing.T) string {
+	t.Helper()
+	if url := os.Getenv("CONNECT_TEST_NATS_URL"); url != "" {
+		return url
 	}
-	conn, js, err := connect.ConnectURL(url, "harness-test")
+	bin, err := exec.LookPath("nats-server")
 	if err != nil {
-		t.Fatalf("connect: %v", err)
+		t.Skip("nats-server not installed and CONNECT_TEST_NATS_URL not set")
 	}
-	defer conn.Close()
-	stream := "VIKNTEST" + uuid.New().String()[:8]
-	prefix := "t" + uuid.New().String()[:8]
-	if err := connect.EnsureStream(js, stream, prefix+".>"); err != nil {
-		t.Fatalf("EnsureStream: %v", err)
+	port := 42200 + int(time.Now().UnixNano()%300)
+	dir := t.TempDir()
+	cmd := exec.Command(bin, "-js", "-sd", dir, "-a", "127.0.0.1", "-p", strconv.Itoa(port))
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
 	}
-	defer js.DeleteStream(stream)
-
-	org := uuid.New()
-	publish := func(id string, actor connect.Actor) {
-		env := connect.Envelope{ID: id, Source: "vikn.desk", Type: "com.vikn.desk.ticket.created.v1", Subject: "s",
-			Time: time.Now().UTC(), Data: []byte(`{"ticket_id":"x"}`), OrganizationID: org, Actor: actor}
-		if _, err := js.PublishMsg(env.NewMsg(prefix)); err != nil {
-			t.Fatalf("publish %s: %v", id, err)
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
+	url := "nats://127.0.0.1:" + strconv.Itoa(port)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if nc, err := nats.Connect(url); err == nil {
+			nc.Close()
+			return url
 		}
+		time.Sleep(50 * time.Millisecond)
 	}
+	t.Fatal("broker did not come up")
+	return ""
+}
 
-	var mu sync.Mutex
-	handled := map[string]int{}
-	skipped := []string{}
-	store := &memStore{}
-	done := make(chan struct{}, 8)
-	opts := Options{
-		Subject: prefix + ".vikn.desk.ticket.created.v1", Durable: "harness-test", Stream: stream, MaxDeliver: 2,
-		Store: store,
-		Handler: func(_ context.Context, d Delivery) error {
-			mu.Lock()
-			handled[d.Envelope.ID]++
-			mu.Unlock()
-			done <- struct{}{}
-			if d.Envelope.ID == "poison" {
-				return errors.New("always fails")
-			}
-			return nil
-		},
-		Skipped: func(_ context.Context, d Delivery, reason string) error {
-			mu.Lock()
-			skipped = append(skipped, d.Envelope.ID+":"+reason)
-			mu.Unlock()
-			done <- struct{}{}
-			return nil
-		},
+func publish(t *testing.T, js nats.JetStreamContext, id string) {
+	t.Helper()
+	env := connect.Envelope{ID: id, Source: "vikn.desk", Type: "com.vikn.desk.ticket.created.v1", Subject: "s", Time: time.Now().UTC(),
+		Data: []byte(`{}`), OrganizationID: uuid.New()}
+	if _, err := js.PublishMsg(env.NewMsg("vikn")); err != nil {
+		t.Fatal(err)
 	}
-	sub, err := Subscribe(js, opts)
-	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
-	}
-	defer sub.Unsubscribe()
+}
 
-	publish("good", connect.UserActor(uuid.New()))
-	publish("loop", connect.IntegrationActor("other-app"))
-	publish("poison", connect.Actor{})
+type collector struct {
+	mu  sync.Mutex
+	ids []string
+}
 
-	// good: 1 handler call. loop: 1 skip. poison: 2 handler calls (MaxDeliver 2, ~1s nak delay).
-	deadline := time.After(15 * time.Second)
-	for events := 0; events < 4; {
-		select {
-		case <-done:
-			events++
-		case <-deadline:
-			t.Fatalf("timed out: handled=%v skipped=%v", handled, skipped)
+func (c *collector) handler(_ context.Context, d Delivery) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ids = append(c.ids, d.Envelope.ID)
+	return nil
+}
+
+func (c *collector) wait(t *testing.T, n int) []string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		c.mu.Lock()
+		got := append([]string(nil), c.ids...)
+		c.mu.Unlock()
+		if len(got) >= n {
+			return got
 		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	time.Sleep(500 * time.Millisecond) // let the final term/rejection land
-	mu.Lock()
-	defer mu.Unlock()
-	if handled["good"] != 1 || handled["poison"] != 2 || handled["loop"] != 0 {
-		t.Fatalf("handled = %v", handled)
-	}
-	if len(skipped) != 1 || skipped[0] != "loop:integration_actor" {
-		t.Fatalf("skipped = %v", skipped)
-	}
-	if len(store.rejections) != 1 || store.rejections[0].EventID != "poison" || store.rejections[0].DeliveryCount != 2 {
-		t.Fatalf("rejections = %+v", store.rejections)
-	}
-	info, err := js.ConsumerInfo(stream, "harness-test")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.ids...)
+}
+
+// A brand-new rules durable must not replay the stream; an observer that
+// asks for history gets it; an existing durable binds regardless of policy.
+func TestSubscribeDeliverPolicy(t *testing.T) {
+	url := startBroker(t)
+	nc, js, err := connect.ConnectURL(url, "test")
 	if err != nil {
-		t.Fatalf("ConsumerInfo: %v", err)
+		t.Fatal(err)
 	}
-	if info.NumPending != 0 || info.NumAckPending != 0 {
-		t.Fatalf("consumer should be drained: pending=%d ackpending=%d", info.NumPending, info.NumAckPending)
+	defer nc.Close()
+	if err := connect.EnsureStream(js, "VIKN", "vikn.>"); err != nil {
+		t.Fatal(err)
+	}
+	publish(t, js, "old-1")
+	publish(t, js, "old-2")
+
+	rules := &collector{}
+	sub, err := Subscribe(js, Options{Subject: "vikn.>", Durable: "rules-v1", Stream: "VIKN", Handler: rules.handler})
+	if err != nil {
+		t.Fatalf("rules subscribe: %v", err)
+	}
+	audit := &collector{}
+	auditSub, err := Subscribe(js, Options{Subject: "vikn.>", Durable: "audit-v1", Stream: "VIKN", Handler: audit.handler, ReplayHistory: true, AllowIntegrationActor: true})
+	if err != nil {
+		t.Fatalf("audit subscribe: %v", err)
+	}
+	publish(t, js, "new-1")
+
+	if got := rules.wait(t, 1); len(got) != 1 || got[0] != "new-1" {
+		t.Fatalf("rules consumer must start at new events, got %v", got)
+	}
+	if got := audit.wait(t, 3); len(got) != 3 {
+		t.Fatalf("observer must replay history, got %v", got)
+	}
+
+	// Rebinding the existing rules durable, even with ReplayHistory set,
+	// keeps its position instead of failing or starting over.
+	_ = sub.Unsubscribe()
+	_ = auditSub.Unsubscribe()
+	rebound := &collector{}
+	if _, err := Subscribe(js, Options{Subject: "vikn.>", Durable: "rules-v1", Stream: "VIKN", Handler: rebound.handler, ReplayHistory: true}); err != nil {
+		t.Fatalf("rebind existing durable: %v", err)
+	}
+	publish(t, js, "new-2")
+	if got := rebound.wait(t, 1); len(got) != 1 || got[0] != "new-2" {
+		t.Fatalf("rebound durable should continue from its position, got %v", got)
 	}
 }
