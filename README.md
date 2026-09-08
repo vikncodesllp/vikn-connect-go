@@ -15,6 +15,8 @@ check identical across repos.
 | `outbox` | `Event` row (`integration_outboxes`), `Enqueue` gated on `NATS_URL`, `Dispatcher`, `NATSPublisher`, `Run` |
 | `consumer` | `Subscribe` + `Handle` harness: parse, integration-actor loop breaker, backoff nak, poison → `integration_event_rejections`, then terminate |
 | `link` | `Link` row (`integration_links`): this local record ↔ that remote record, with the cached far-side status |
+| `rules` | `Rule` row (`integration_rules`, generalized: source app, source event type, action key, JSON config), `Action` interface + `Registry`, save-time `Validate` with per-field errors, and the `Router` that runs matching rules per delivery and keeps history |
+| `delivery` | `Record` row (`integration_deliveries`): one row per (event, action) — idempotency and operator history |
 | `token` | `Verifier` for the RS256 integration tokens auth_go mints (JWKS cache, audience + scope checks), and `Client` for obtaining them: client-credentials token, `/api/connect/resolve`, and `GetJSON` against the far side's scoped API |
 
 ## Rules the harness enforces
