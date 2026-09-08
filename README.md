@@ -23,7 +23,12 @@ check identical across repos.
 
 - **An event whose actor is an integration client never fires a tenant
   rule.** `consumer.Options.AllowIntegrationActor` is false by default; only
-  pure observers (the audit consumer) turn it on.
+  pure observers (the audit consumer) and cache maintainers turn it on. The
+  actor says who *caused* the event, not who published it: a person is
+  `user:<id>`, an app reacting to the bus is `integration:<client>`, and an
+  anonymous person (a website visitor sending a form) is **no actor at all**.
+  Stamping a producer's own client on a visitor's event makes every rule
+  ignore it.
 - **Nothing is enqueued without a broker.** `outbox.Enqueue` is a no-op when
   `NATS_URL` is unset, so a table cannot grow with rows nothing drains.
 - **A new durable starts at new events.** `consumer.Subscribe` creates the
