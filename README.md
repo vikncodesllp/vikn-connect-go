@@ -15,6 +15,7 @@ check identical across repos.
 | `outbox` | `Event` row (`integration_outboxes`), `Enqueue` gated on `NATS_URL`, `Dispatcher`, `NATSPublisher`, `Run` |
 | `consumer` | `Subscribe` + `Handle` harness: parse, integration-actor loop breaker, backoff nak, poison → `integration_event_rejections`, then terminate |
 | `link` | `Link` row (`integration_links`): this local record ↔ that remote record, with the cached far-side status |
+| `token` | `Verifier` for the RS256 integration tokens auth_go mints (JWKS cache, audience + scope checks), and `Client` for obtaining them: client-credentials token, `/api/connect/resolve`, and `GetJSON` against the far side's scoped API |
 
 ## Rules the harness enforces
 
@@ -37,6 +38,8 @@ check identical across repos.
 | `NATS_URL` | broker; unset = bus off for this process |
 | `NATS_SUBJECT_PREFIX` | defaults to `vikn` |
 | `NATS_STREAM` | defaults to `VIKN` (per-app binaries read it themselves) |
+| `SSO_JWKS_URL` / `AUTH_SERVICE_URL` | where `token.VerifierFromEnv` fetches keys (sandbox and production share a kid with different keys, so point at your own auth_go) |
+| `CONNECT_CLIENT_ID` / `CONNECT_CLIENT_SECRET` | this app's confidential OAuth client; with `AUTH_SERVICE_URL` they make `token.NewClientFromEnv` non-nil |
 
 ## Tests
 
