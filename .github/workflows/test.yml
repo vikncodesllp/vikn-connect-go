@@ -15,7 +15,12 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # The org's self-hosted box (2GB droplet, Docker for service containers).
+    # GitHub-hosted ubuntu minutes are billed; this one is not. If the runner
+    # is ever down this job queues rather than failing, so check
+    # https://github.com/organizations/vikncodesllp/settings/actions/runners
+    # before assuming a hung job is the code's fault.
+    runs-on: [self-hosted, vikn-linux]
     services:
       postgres:
         image: postgres:16-alpine
