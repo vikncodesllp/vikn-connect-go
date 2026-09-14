@@ -1,8 +1,17 @@
 name: Test
 
+# push with no branch filter meant every commit on a PR branch ran this twice:
+# once for the push, once for the pull_request. main only, and the PR trigger
+# covers everything else.
 on:
   push:
+    branches:
+      - main
   pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
